@@ -7,14 +7,19 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 
+from wifi_cut import camera_scan
 from wifi_cut.session import SessionManager
-from wifi_cut.ui_helpers import make_device_table, make_status_panel, format_device_choice
+from wifi_cut.ui_helpers import (
+    make_device_table, make_status_panel, format_device_choice,
+    make_camera_table, make_camera_summary_panel,
+)
 
 console = Console()
 
 MENU_CHOICES = [
     "Scan Network          掃描網路",
     "View Devices          查看裝置",
+    "Camera Detection      攝影機偵測",
     "Block Devices         封鎖裝置",
     "Unblock Devices       解除封鎖",
     "Throttle Devices      限速裝置",
@@ -107,6 +112,7 @@ def _main_loop(session: SessionManager, timeout: int) -> None:
     handlers = [
         lambda: _handle_scan(session, timeout),
         lambda: _handle_view(session),
+        lambda: _handle_camera_scan(session, timeout),
         lambda: _handle_cut(session, timeout),
         lambda: _handle_uncut(session),
         lambda: _handle_throttle(session, timeout),
@@ -148,6 +154,44 @@ def _handle_view(session: SessionManager) -> None:
         session.blocked_ips, session.throttled_ips,
     )
     console.print(table)
+    input("\n按 Enter 返回主選單...")
+
+
+def _handle_camera_scan(session: SessionManager, timeout: int) -> None:
+    """攝影機偵測：對掃描到的裝置做連接埠掃描 + 指紋，再做網段 ONVIF/SSDP 主動發現。"""
+    assert session.gateway is not None
+    if not session.devices:
+        console.print("[dim]自動掃描中...[/dim]")
+        session.scan(timeout=timeout)
+
+    targets = [
+        d for d in session.devices
+        if d.ip != session.gateway.ip and d.ip != session.local_ip
+    ]
+    if not targets:
+        console.print("[yellow]沒有可偵測的裝置。[/yellow]")
+        return
+
+    console.print(f"[dim]連接埠掃描 + 指紋辨識 {len(targets)} 台裝置...[/dim]")
+    results = camera_scan.scan_devices(targets)
+    console.print(make_camera_table(results))
+
+    console.print("[dim]ONVIF / SSDP 主動發現中（找出無開放埠的攝影機）...[/dim]")
+    onvif = camera_scan.discover_onvif(local_ip=session.local_ip)
+    ssdp_cams = [d for d in camera_scan.discover_ssdp(local_ip=session.local_ip) if d.camera_like]
+
+    if onvif:
+        console.print("[red]ONVIF 攝影機發現:[/red]")
+        for cam in onvif:
+            console.print(f"  {cam.ip}  XAddrs={cam.xaddrs}")
+    else:
+        console.print("[green]ONVIF 探測: 未發現 IP 攝影機。[/green]")
+    if ssdp_cams:
+        console.print("[red]SSDP 疑似攝影機:[/red]")
+        for d in ssdp_cams:
+            console.print(f"  {d.ip}  {d.descriptions[:2]}")
+
+    console.print(make_camera_summary_panel(results))
     input("\n按 Enter 返回主選單...")
 
 
