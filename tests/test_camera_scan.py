@@ -3,6 +3,8 @@ from wifi_cut.camera_scan import (
     match_http_signature,
     assess,
     ssdp_looks_like_camera,
+    parse_modelname_xml,
+    cast_model_has_camera,
     PortResult,
     RTSP_PORTS,
 )
@@ -106,3 +108,54 @@ def test_ssdp_router_is_not_camera():
     desc = ("AsusWRT/388 UPnP/1.1 MiniUPnPd/2.2.0; "
             "urn:schemas-upnp-org:service:WANIPConnection:1")
     assert ssdp_looks_like_camera(desc) is False
+
+
+# --------------------------- Cast 型號 / 攝影機機種辨識 --------------------------- #
+_DEVICE_DESC = (
+    '<?xml version="1.0"?><root><device>'
+    "<friendlyName>Bedroom Display</friendlyName>"
+    "<manufacturer>Google Inc.</manufacturer>"
+    "<modelName>Google Nest Hub</modelName>"
+    "</device></root>"
+)
+
+
+def test_parse_modelname_xml():
+    assert parse_modelname_xml(_DEVICE_DESC) == "Google Nest Hub"
+    assert parse_modelname_xml("<root><device/></root>") is None
+    assert parse_modelname_xml("") is None
+    assert parse_modelname_xml(None) is None
+
+
+def test_cast_model_has_camera():
+    assert cast_model_has_camera("Google Nest Hub Max")
+    assert cast_model_has_camera("google nest hub max")
+    assert not cast_model_has_camera("Google Nest Hub")
+    assert not cast_model_has_camera("SHIELD Android TV")
+    assert not cast_model_has_camera(None)
+    assert not cast_model_has_camera("")
+
+
+def test_assess_benign_camera_model_warns():
+    # 型號確認為含鏡頭機種 -> IDENTIFIED_BENIGN 但摘要明確警示有鏡頭
+    identity = "Google Cast/Nest 裝置: Kitchen（Google Nest Hub Max） ⚠含實體攝影機機種"
+    verdict, conf, summary = assess("low", [], identity)
+    assert verdict == "IDENTIFIED_BENIGN"
+    assert conf == "high"
+    assert "鏡頭" in summary
+
+
+def test_assess_benign_model_known_no_hedge():
+    # 型號已確認 (非 Max) -> 不再加「未取得型號」泛用警語
+    identity = "Google Cast/Nest 裝置: Bedroom（Google Nest Hub）"
+    verdict, _conf, summary = assess("low", [], identity)
+    assert verdict == "IDENTIFIED_BENIGN"
+    assert "未取得型號" not in summary
+
+
+def test_assess_benign_model_unknown_keeps_hedge():
+    # Cast/Nest 但未取得型號 -> 保留 Nest Hub Max 提醒
+    identity = "Google Cast/Nest 裝置: Dining Speaker"
+    verdict, _conf, summary = assess("low", [], identity)
+    assert verdict == "IDENTIFIED_BENIGN"
+    assert "未取得型號" in summary

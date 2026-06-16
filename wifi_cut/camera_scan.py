@@ -248,8 +248,44 @@ def _parse_http(text: str) -> str:
     return " ".join(parts) or "(HTTP 無 banner)"
 
 
+# Cast/Nest 機型中「內含實體攝影機」的型號關鍵字。出現即代表此良性裝置仍具鏡頭，
+# 應在判定中明確標示（最典型為 Google Nest Hub Max）。
+_CAST_CAMERA_MODELS = ["nest hub max"]
+
+
+def parse_modelname_xml(text: str) -> Optional[str]:
+    """從 UPnP device-desc.xml 取出 <modelName>（純函式，方便測試）。"""
+    m = re.search(r"<modelName>(.*?)</modelName>", text or "", re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else None
+
+
+def cast_model_has_camera(model: Optional[str]) -> bool:
+    """該 Cast/Nest 型號是否內含實體攝影機（純函式）。"""
+    m = (model or "").lower()
+    return any(k in m for k in _CAST_CAMERA_MODELS)
+
+
+def _cast_model(ip: str, timeout: float) -> Optional[str]:
+    """從 Cast 裝置的 UPnP device-desc.xml 取得 modelName。
+
+    型號**不在** eureka_info 內（新韌體留空），只在 /ssdp/device-desc.xml。
+    """
+    s = _connect(ip, 8008, timeout)
+    if not s:
+        return None
+    try:
+        text = _http_get(s, ip, "/ssdp/device-desc.xml", timeout)
+    finally:
+        s.close()
+    return parse_modelname_xml(text)
+
+
 def _probe_cast(ip: str, timeout: float) -> Optional[str]:
-    """Google Cast / Nest：讀 eureka_info 取得裝置名稱。"""
+    """Google Cast / Nest：讀 eureka_info 取名稱，再讀 device-desc.xml 取型號。
+
+    型號很重要：Nest Hub Max 等機種**內含實體攝影機**，雖屬已知裝置仍須標示出來，
+    才不會把「有鏡頭的智慧螢幕」當成完全無害。
+    """
     s = _connect(ip, 8008, timeout)
     if not s:
         return None
@@ -265,7 +301,13 @@ def _probe_cast(ip: str, timeout: float) -> Optional[str]:
     except (json.JSONDecodeError, ValueError):
         return None
     name = data.get("name") or "(未命名)"
-    return f"Google Cast/Nest 裝置: {name}"
+    label = f"Google Cast/Nest 裝置: {name}"
+    model = _cast_model(ip, timeout)
+    if model:
+        label += f"（{model}）"
+        if cast_model_has_camera(model):
+            label += " ⚠含實體攝影機機種"
+    return label
 
 
 def _probe_samsung(ip: str, timeout: float) -> Optional[str]:
@@ -402,9 +444,14 @@ def assess(vendor_level: str, open_ports: list[PortResult],
 
     # 1) 已辨識為已知非攝影機裝置 (Google 智慧螢幕 / Samsung 顯示器)
     if identity and not strong_camera_kinds and not strong_http:
-        note = ""
-        if "Cast" in identity or "Nest" in identity:
-            note = "（註：若為 Nest Hub Max 等含鏡頭機種，仍具視訊鏡頭，但屬已知裝置）"
+        if "含實體攝影機" in identity:
+            # 型號已確認為含鏡頭機種 (e.g. Nest Hub Max) → 明確警示，而非泛用 hedge
+            note = "（注意：此機型內含實體鏡頭，雖為已知裝置，建議確認鏡頭遮蔽/用途）"
+        elif ("cast" in identity.lower() or "nest" in identity.lower()) and "（" not in identity:
+            # Cast/Nest 但未取得型號 → 保留泛用提醒
+            note = "（註：未取得型號；Nest Hub Max 等機種仍含鏡頭，建議確認）"
+        else:
+            note = ""
         return ("IDENTIFIED_BENIGN", "high", f"已辨識為非針孔攝影機裝置 → {identity}{note}")
 
     # 2) 攝影機強指標：RTSP / DVR 私有埠 / RTMP / 強 HTTP 特徵
