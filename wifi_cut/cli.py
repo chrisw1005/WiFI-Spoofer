@@ -113,7 +113,9 @@ def cmd_cut(args):
 def cmd_camscan(args):
     """攝影機偵測：連接埠掃描 + 指紋 + ONVIF/SSDP 主動發現。
 
-    給定目標 IP 時不需 root；未給定時會先做 ARP 掃描取得裝置清單（需 root）。
+    給定目標 IP 時不需 root。未給定時會自動偵測權限取得裝置清單：
+    有系統管理員權限用主動 ARP 掃描（最完整）；否則改用免提權的鄰居表發現
+    （TCP/ARP sweep 觸發系統 ARP 解析 + 讀系統 ARP 快取）。
     """
     if args.targets:
         from wifi_cut.scanner import resolve_hostname
@@ -123,16 +125,24 @@ def cmd_camscan(args):
         ]
         local_ip = camera_scan.default_local_ip()
         print("[!] 註: 指定 IP 模式無 MAC/廠商資訊，廠商可疑度有限；"
-              "完整判斷請用無參數模式 (ARP 掃描，需 root)。")
+              "完整判斷請用無參數模式 (自動依權限選擇 ARP 掃描或鄰居表發現)。")
     else:
-        check_root()
-        check_platform()
-        gateway = get_gateway_info()
-        local_ip, mask = get_local_ip_and_mask(gateway.interface)
+        from wifi_cut.platform_check import is_admin
+        from wifi_cut.gateway import get_gateway_ip_and_interface
+        from wifi_cut.scanner import discover_neighbors
+        gw_ip, interface = get_gateway_ip_and_interface()
+        local_ip, mask = get_local_ip_and_mask(interface)
         cidr = calculate_cidr(local_ip, mask)
-        print(f"[*] Scanning {cidr} ...")
-        scanned = scan_network(cidr, gateway.interface, timeout=args.timeout)
-        targets = [d for d in scanned if d.ip != gateway.ip and d.ip != local_ip]
+        if is_admin():
+            check_platform()
+            print(f"[*] Scanning {cidr} (主動 ARP 掃描) ...")
+            scanned = scan_network(cidr, interface, timeout=args.timeout)
+        else:
+            print("[!] 非系統管理員權限：改用免提權的鄰居表發現")
+            print("    (對網段做 TCP/ARP sweep 觸發系統 ARP 解析，再讀系統 ARP 快取)")
+            print(f"[*] Scanning {cidr} (鄰居表發現) ...")
+            scanned = discover_neighbors(cidr)
+        targets = [d for d in scanned if d.ip != gw_ip and d.ip != local_ip]
 
     print(f"[*] Camera-scanning {len(targets)} target(s)...\n")
     results = camera_scan.scan_devices(targets)
