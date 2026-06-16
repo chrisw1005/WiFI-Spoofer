@@ -70,16 +70,25 @@ def _download_and_install_npcap() -> None:
         pass
 
 
-def check_root() -> None:
+def is_admin() -> bool:
+    """是否具備系統管理員 / root 權限（不會結束程式，純查詢）。"""
     if sys.platform == "win32":
         import ctypes
-        if not ctypes.windll.shell32.IsUserAnAdmin():
-            print("[!] 此工具需要系統管理員權限，請以「以系統管理員身分執行」開啟終端。")
-            sys.exit(1)
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    return os.geteuid() == 0
+
+
+def check_root() -> None:
+    if is_admin():
+        return
+    if sys.platform == "win32":
+        print("[!] 此工具需要系統管理員權限，請以「以系統管理員身分執行」開啟終端。")
     else:
-        if os.geteuid() != 0:
-            print("[!] 此工具需要 root 權限，請使用 sudo 執行。")
-            sys.exit(1)
+        print("[!] 此工具需要 root 權限，請使用 sudo 執行。")
+    sys.exit(1)
 
 
 def check_platform() -> None:

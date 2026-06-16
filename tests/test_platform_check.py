@@ -5,15 +5,16 @@ from wifi_cut.platform_check import check_root
 
 
 def test_check_root_fails_when_not_root_macos():
+    # create=True 讓本測試在 Windows 也能跑（Windows 的 os 沒有 geteuid）
     with patch("wifi_cut.platform_check.sys.platform", "darwin"):
-        with patch("os.geteuid", return_value=1000):
+        with patch("wifi_cut.platform_check.os.geteuid", create=True, return_value=1000):
             with pytest.raises(SystemExit):
                 check_root()
 
 
 def test_check_root_passes_when_root_macos():
     with patch("wifi_cut.platform_check.sys.platform", "darwin"):
-        with patch("os.geteuid", return_value=0):
+        with patch("wifi_cut.platform_check.os.geteuid", create=True, return_value=0):
             check_root()
 
 
