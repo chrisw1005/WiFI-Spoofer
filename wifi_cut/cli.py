@@ -4,6 +4,7 @@ import sys
 import time
 import atexit
 
+from wifi_cut import camera_scan
 from wifi_cut.platform_check import check_root, check_platform, ensure_ip_forwarding_disabled, ensure_ip_forwarding_enabled, set_ip_forwarding
 from wifi_cut.throttler import Throttler
 from wifi_cut.gateway import get_gateway_info, get_mac_by_ip
@@ -107,6 +108,53 @@ def cmd_cut(args):
             time.sleep(1)
     except KeyboardInterrupt:
         cleanup()
+
+
+def cmd_camscan(args):
+    """攝影機偵測：連接埠掃描 + 指紋 + ONVIF/SSDP 主動發現。
+
+    給定目標 IP 時不需 root；未給定時會先做 ARP 掃描取得裝置清單（需 root）。
+    """
+    if args.targets:
+        from wifi_cut.scanner import resolve_hostname
+        # 直接指定 IP：無 MAC/廠商資訊，至少解析 hostname 讓 hostname 特徵生效
+        targets: list = [
+            Device(ip=ip, mac="", hostname=resolve_hostname(ip)) for ip in args.targets
+        ]
+        local_ip = camera_scan.default_local_ip()
+        print("[!] 註: 指定 IP 模式無 MAC/廠商資訊，廠商可疑度有限；"
+              "完整判斷請用無參數模式 (ARP 掃描，需 root)。")
+    else:
+        check_root()
+        check_platform()
+        gateway = get_gateway_info()
+        local_ip, mask = get_local_ip_and_mask(gateway.interface)
+        cidr = calculate_cidr(local_ip, mask)
+        print(f"[*] Scanning {cidr} ...")
+        scanned = scan_network(cidr, gateway.interface, timeout=args.timeout)
+        targets = [d for d in scanned if d.ip != gateway.ip and d.ip != local_ip]
+
+    print(f"[*] Camera-scanning {len(targets)} target(s)...\n")
+    results = camera_scan.scan_devices(targets)
+
+    order = {"LIKELY_CAMERA": 0, "OPEN_UNCLEAR": 1, "INDETERMINATE_CLOUD": 2, "IDENTIFIED_BENIGN": 3}
+    for r in sorted(results, key=lambda x: order.get(x.verdict, 9)):
+        ports = ", ".join(f"{p.port}/{p.kind}" for p in r.open_ports) or "—"
+        name = r.identity or r.hostname or r.vendor or "--"
+        print(f"[{r.verdict:<20}] {r.ip:<16} 可疑度={r.vendor_level:<6} {name}")
+        print(f"    開放埠: {ports}")
+        print(f"    判定: {r.summary}\n")
+
+    print("[*] ONVIF / SSDP 主動發現 (找出無開放埠的攝影機)...")
+    onvif = camera_scan.discover_onvif(local_ip=local_ip)
+    if onvif:
+        for cam in onvif:
+            print(f"    [ONVIF 攝影機] {cam.ip}  XAddrs={cam.xaddrs}")
+    else:
+        print("    ONVIF: 未發現 IP 攝影機")
+    for d in camera_scan.discover_ssdp(local_ip=local_ip):
+        if d.camera_like:
+            print(f"    [SSDP 疑似攝影機] {d.ip}  {d.descriptions[:2]}")
 
 
 def cmd_interactive(args):
@@ -271,6 +319,14 @@ def main():
 
     sub.add_parser("scan", help="Scan and list all devices on the network")
 
+    camscan_parser = sub.add_parser(
+        "camscan", help="Detect hidden/pinhole cameras (port scan + ONVIF/SSDP)"
+    )
+    camscan_parser.add_argument(
+        "targets", nargs="*",
+        help="Target IPs (no root needed); if omitted, ARP-scans the network first",
+    )
+
     cut_parser = sub.add_parser("cut", help="Block specific devices by IP")
     cut_parser.add_argument("targets", nargs="+", help="Target IP addresses")
 
@@ -287,6 +343,8 @@ def main():
 
     if args.command == "scan":
         cmd_scan(args)
+    elif args.command == "camscan":
+        cmd_camscan(args)
     elif args.command == "cut":
         cmd_cut(args)
     elif args.command == "throttle":

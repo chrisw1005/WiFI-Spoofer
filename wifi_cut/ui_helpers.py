@@ -3,6 +3,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from wifi_cut.scanner import Device
+from wifi_cut.camera_scan import CameraScanResult
 
 
 def make_device_table(
@@ -67,6 +68,70 @@ def make_status_panel(
 
     content = "\n".join(lines)
     return Panel(content, title="wifi-cut Status", border_style="bright_blue")
+
+
+_VERDICT_STYLE = {
+    "LIKELY_CAMERA": ("red", "高度疑似攝影機"),
+    "OPEN_UNCLEAR": ("yellow", "有開放埠待確認"),
+    "INDETERMINATE_CLOUD": ("cyan", "雲端裝置/需流量分析"),
+    "IDENTIFIED_BENIGN": ("green", "已辨識非攝影機"),
+}
+
+_LEVEL_STYLE = {
+    "high": "[red]高[/red]",
+    "medium": "[yellow]中[/yellow]",
+    "low": "[dim]低[/dim]",
+    "none": "[green]無[/green]",
+}
+
+
+def make_camera_table(results: list[CameraScanResult]) -> Table:
+    """攝影機偵測結果表。依判定嚴重度由高到低排序顯示。"""
+    order = {"LIKELY_CAMERA": 0, "OPEN_UNCLEAR": 1, "INDETERMINATE_CLOUD": 2,
+             "IDENTIFIED_BENIGN": 3}
+    rows = sorted(results, key=lambda r: order.get(r.verdict, 9))
+
+    table = Table(title="攝影機偵測結果 (Camera Detection)", show_lines=True)
+    table.add_column("IP", min_width=14)
+    table.add_column("廠商可疑度", justify="center", min_width=6)
+    table.add_column("Hostname/廠商", min_width=16)
+    table.add_column("開放埠", min_width=14)
+    table.add_column("判定", min_width=20)
+
+    for r in rows:
+        color, verdict_label = _VERDICT_STYLE.get(r.verdict, ("white", r.verdict))
+        ports = ", ".join(f"{p.port}/{p.kind}" for p in r.open_ports) or "—"
+        name = r.identity or r.hostname or r.vendor or "--"
+        table.add_row(
+            r.ip,
+            _LEVEL_STYLE.get(r.vendor_level, r.vendor_level),
+            name[:28],
+            ports[:32],
+            f"[{color}]{verdict_label}[/{color}]",
+        )
+    return table
+
+
+def make_camera_summary_panel(results: list[CameraScanResult]) -> Panel:
+    """攝影機偵測總結面板（含建議）。"""
+    likely = [r for r in results if r.verdict == "LIKELY_CAMERA"]
+    unclear = [r for r in results if r.verdict == "OPEN_UNCLEAR"]
+    cloud = [r for r in results if r.verdict == "INDETERMINATE_CLOUD"]
+
+    lines = [
+        f"[red]高度疑似攝影機:[/red] {len(likely)} 台",
+        f"[yellow]待確認:[/yellow] {len(unclear)} 台",
+        f"[cyan]雲端裝置(無法由埠判定):[/cyan] {len(cloud)} 台",
+    ]
+    if likely:
+        lines.append("\n[red]→ 立即處理:[/red] " + ", ".join(r.ip for r in likely))
+    if cloud:
+        lines.append(
+            "\n[dim]雲端裝置無開放埠，無法由連接埠判定是否為攝影機。\n"
+            "  建議: 1) 查路由器/App 裝置清單  2) 用本工具『頻寬測試』觀察上傳流量\n"
+            "        (攝影機會持續高流量上傳影像)  3) 檢查獨立 IoT/訪客 SSID[/dim]"
+        )
+    return Panel("\n".join(lines), title="偵測總結", border_style="bright_yellow")
 
 
 def format_device_choice(device: Device, gateway_ip: str) -> str:

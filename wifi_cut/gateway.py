@@ -30,14 +30,38 @@ def parse_ipconfig_gateway(output: str) -> str:
     return match.group(1)
 
 
+def _default_gateway_from_routes(iface_name: str, routes) -> str:
+    """從 scapy 路由表找出指定介面的預設閘道。
+
+    routes 為 scapy ``conf.route.routes``，每列為
+    (network:int, netmask:int, gateway:str, iface, output_ip:str, metric:int)。
+    只取該介面的預設路由 (net==0, mask==0) 且閘道非 0.0.0.0 者，取 metric 最小的。
+    """
+    best_metric = None
+    best_gw = None
+    for net, mask, gw, route_iface, _outip, metric in routes:
+        if net != 0 or mask != 0:
+            continue
+        if route_iface != iface_name:
+            continue
+        if gw in ("0.0.0.0", "::"):
+            continue
+        if best_metric is None or metric < best_metric:
+            best_metric = metric
+            best_gw = gw
+    if best_gw is None:
+        raise RuntimeError("無法從路由表取得預設閘道")
+    return best_gw
+
+
 def get_gateway_ip_and_interface() -> tuple[str, str]:
     if sys.platform == "win32":
-        result = subprocess.run(
-            ["ipconfig"], capture_output=True, text=True
-        )
-        ip = parse_ipconfig_gateway(result.stdout)
+        # 閘道與介面都取自 scapy 的路由表 (conf.iface 的預設路由)，與掃描所用的
+        # 介面同源，避免解析 ipconfig 時誤抓到 VPN / 虛擬介面的閘道。
         from scapy.all import conf
-        return ip, conf.iface
+        iface = conf.iface
+        ip = _default_gateway_from_routes(iface.network_name, conf.route.routes)
+        return ip, iface
     else:
         result = subprocess.run(
             ["route", "-n", "get", "default"],

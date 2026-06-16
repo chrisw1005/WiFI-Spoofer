@@ -26,17 +26,46 @@ def calculate_cidr(ip: str, mask: str) -> str:
     return str(network)
 
 
-def get_local_ip_and_mask(interface: str) -> tuple[str, str]:
+def _netmask_from_routes(ip: str, routes) -> str:
+    """從 scapy 路由表找出 ip 所在介面的直連子網路遮罩。
+
+    routes 為 scapy ``conf.route.routes``，每列為
+    (network:int, netmask:int, gateway:str, iface, output_ip:str, metric:int)。
+    只取與本機 IP 同介面、閘道為 0.0.0.0 的直連路由，排除預設路由 (mask 0)、
+    /32 主機與廣播路由、以及不包含本機 IP 的多播路由，取最長前綴者。
+    """
+    ip_int = int(ipaddress.IPv4Address(ip))
+    best_prefix = -1
+    best_mask = None
+    for net, mask, gw, _iface, outip, _metric in routes:
+        if gw != "0.0.0.0" or outip != ip:
+            continue
+        if mask in (0, 0xFFFFFFFF):
+            continue
+        if (ip_int & mask) != (net & mask):
+            continue
+        prefix = bin(mask).count("1")
+        if prefix > best_prefix:
+            best_prefix = prefix
+            best_mask = mask
+    if best_mask is None:
+        raise RuntimeError("無法從路由表取得子網路遮罩")
+    return str(ipaddress.IPv4Address(best_mask))
+
+
+def get_local_ip_and_mask(interface) -> tuple[str, str]:
     """取得本機 IP 和子網路遮罩（跨平台）。"""
     if sys.platform == "win32":
-        result = subprocess.run(
-            ["ipconfig"], capture_output=True, text=True
-        )
-        ip_match = re.search(r"IPv4 Address[.\s]*:\s+(\d+\.\d+\.\d+\.\d+)", result.stdout)
-        mask_match = re.search(r"Subnet Mask[.\s]*:\s+(\d+\.\d+\.\d+\.\d+)", result.stdout)
-        if not ip_match or not mask_match:
-            raise RuntimeError("無法從 ipconfig 取得 IP 資訊")
-        return ip_match.group(1), mask_match.group(1)
+        # 直接取用 scapy 實際掃描所用介面 (conf.iface) 的 IP 與遮罩，
+        # 避免解析 ipconfig 時誤抓到 VPN / WSL 等虛擬介面（例如 Tailscale 的
+        # 100.x.x.x/32），導致掃描網段錯誤而掃到 0 個裝置。
+        from scapy.all import conf
+        iface = interface if hasattr(interface, "ip") else conf.iface
+        ip = iface.ip
+        if not ip:
+            raise RuntimeError("無法取得本機 IP 位址（網路介面沒有 IPv4）")
+        mask = _netmask_from_routes(ip, conf.route.routes)
+        return ip, mask
     else:
         result = subprocess.run(
             ["ifconfig", interface], capture_output=True, text=True
